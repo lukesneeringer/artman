@@ -143,7 +143,7 @@ RUN mkdir -p /root/
 ADD artman-user-config-in-docker.yaml /root/.artman/config.yaml
 
 # Install artman and run the smoke test.
-RUN pip3 install googleapis-artman==0.4.3
+RUN pip3 install googleapis-artman==0.4.4
 
 # TODO (lukesneeringer): Move smoke tests to a different venue.
 # RUN smoketest_artman.py \
