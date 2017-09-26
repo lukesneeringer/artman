@@ -55,8 +55,8 @@ class PythonChangePackageTask(task_base.TaskBase):
 
     # TODO (geigerj): add regex for documentation link updates?
 
-    def execute(self, src_proto_path, import_proto_path, common_protos_yaml,
-                organization_name):
+    def execute(self, api_name, api_version, src_proto_path, import_proto_path,
+                common_protos_yaml, organization_name):
         self._organization_name = organization_name
 
         with io.open(common_protos_yaml) as file_:
@@ -78,9 +78,13 @@ class PythonChangePackageTask(task_base.TaskBase):
         new_import_path = [new_proto_dir]
 
         self._copy_and_transform_directories(
-            src_proto_path, new_proto_dir, common_protos, paths=new_src_path)
+            src_proto_path, new_proto_dir, common_protos, paths=new_src_path,
+            api_name=api_name, api_version=api_version,
+        )
         self._copy_and_transform_directories(
-            import_proto_path, new_proto_dir, common_protos)
+            import_proto_path, new_proto_dir, common_protos,
+            api_name=api_name, api_version=api_version,
+        )
 
         # Update src_proto_path, import_proto_path
         return list(new_src_path), new_import_path
@@ -96,45 +100,49 @@ class PythonChangePackageTask(task_base.TaskBase):
                     return os.path.sep.join(pkg.split('.'))
             return ''
 
-    def _transform(self, pkg, sep, common_protos):
+    def _transform(self, pkg, sep, common_protos, api_name, api_version):
         """Transform to the appropriate proto package layout.
 
         Works with arbitrary separator (e.g., '/' for import statements,
         '.' for proto package statements, os.path.sep for filenames)
         """
+        # Split the proto path into a list, and move the `.proto` extension
+        # off to the side for now.
         if sep != '.' and pkg.endswith('.proto'):
-            dotted = pkg[:-6].replace(sep, '.')
+            dotted = pkg[:-6].replace(sep, '.').split('.')
             suffix = '.proto'
         else:
-            dotted = pkg.replace(sep, '.')
+            dotted = pkg.replace(sep, '.').split('.')
             suffix = ''
 
-        # Sanity check: Do not transform common protos.
-        for common_pkg in common_protos:
-            if dotted.startswith(common_pkg):
-                return pkg
+        # Sanity check: If the API name and version are not present,
+        # this is a no-op.
+        if api_name not in dotted or api_version not in dotted:
+            return pkg
 
         # Special case: If the organization name is "google-cloud", then we
         # have to ensure that "cloud" exists in the path. The protos
         # themselves may not follow this.
-        if 'cloud' not in dotted and self._organization_name == 'google-cloud':
-            dotted = dotted.replace('google.', 'google.cloud.', 1)
+        if all(['google' in dotted,
+                'cloud' not in dotted,
+                self._organization_name == 'google-cloud']):
+            dotted.insert(dotted.index('google') + 1, 'cloud')
 
         # Transform into the ideal proto path.
-        # What essentially should happen here is that "{api}.{vN}" should
-        # change to "{api}_{vN}".
-        dotted = re.sub(r'\.v([\da-z_]*)([\d]+)\b', r'_v\1\2.proto', dotted)
-
-        # Edge case: Some internal customers use "vNalpha".
-        # Rather than make the regular expression more complicated, catch
-        # this as a one-off.
-        if re.search(r'\.v[\d]+alpha\b', dotted):
-            dotted = re.sub(r'\.v([\d]+)alpha\b', r'_v\1alpha.proto', dotted)
+        # What essentially should happen here is:
+        #   '{api_name}.{api_version}' -> '{api_name}_{api_version}'
+        #   '{api_name}.foo.{api_version}' -> '{api_name}_{api_version}.foo'
+        name_index = dotted.index(api_name)
+        version_index = dotted.index(api_version)
+        dotted = dotted[:name_index] + \
+            ['{n}_{v}'.format(n=api_name, v=api_version), 'proto'] + \
+            dotted[name_index + 1:version_index] + \
+            dotted[version_index + 1:]
 
         # Done; return with the appropriate separator.
-        return dotted.replace('.', sep) + suffix
+        return sep.join(dotted) + suffix
 
-    def _copy_proto(self, src, dest, common_protos):
+    def _copy_proto(self, src, dest, common_protos, api_name, api_version):
         """Copies a proto while fixing its imports"""
         with io.open(src, 'r', encoding='UTF-8') as src_lines:
             with io.open(dest, 'w+', encoding='UTF-8') as dest_file:
@@ -143,13 +151,16 @@ class PythonChangePackageTask(task_base.TaskBase):
                     if import_:
                         dest_file.write('import "{}";\n'.format(
                             self._transform(
-                                import_.group('package'), '/', common_protos)))
+                                import_.group('package'), '/', common_protos,
+                                api_name=api_name, api_version=api_version,
+                            ),
+                        ))
                     else:
                         dest_file.write(line)
 
     def _copy_and_transform_directories(
             self, src_directories, destination_directory, common_protos,
-            paths=None):
+            api_name, api_version, paths=None):
         for path in src_directories:
             protos = list(protoc_utils.find_protos([path], []))
             for proto in protos:
@@ -157,7 +168,10 @@ class PythonChangePackageTask(task_base.TaskBase):
                 sub_new_src = os.path.join(
                     destination_directory,
                     self._transform(
-                        src_base_dirs, os.path.sep, common_protos))
+                        src_base_dirs, os.path.sep, common_protos,
+                        api_name=api_name, api_version=api_version,
+                    ),
+                )
                 if paths is not None:
                     paths.add(sub_new_src)
 
@@ -165,7 +179,9 @@ class PythonChangePackageTask(task_base.TaskBase):
                 if not os.path.exists(dest):
                     self.exec_command(['mkdir', '-p', sub_new_src])
                 self._copy_proto(
-                    proto, os.path.join(sub_new_src, dest), common_protos)
+                    proto, os.path.join(sub_new_src, dest), common_protos,
+                    api_name=api_name, api_version=api_version,
+                )
 
 
 class PythonMoveProtosTask(task_base.TaskBase):
